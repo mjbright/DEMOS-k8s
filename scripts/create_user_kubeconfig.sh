@@ -40,24 +40,35 @@ GET_CONTEXT_INFO() {
     echo "CURRENT_CONTEXT=$CURRENT_CONTEXT     CLUSTER=$CLUSTER        CLUSTER_ADDR=$CLUSTER_ADDR"
 }
 
-CREATE_KUBECONFIG() {
+# BUG: when using kubeconfig file
+#      "error: tls: failed to find "CERTIFICATE" PEM block in certificate input after skipping PEM blocks of the following types: [CERTIFICATE REQUEST]"
+CREATE_KUBECONFIG_BUGGY() {
     USER_NAME=$1; shift
     GROUP=$1;     shift
 
-    openssl genrsa -out ${USER_NAME}.key 2048 || die "Failed genrsa"
+    KEY=$TMP_DIR/${USER_NAME}.key
+    CRT=$TMP_DIR/${USER_NAME}.crt
+    CSR=$TMP_DIR/${USER_NAME}.csr
+
+    CMD="openssl genrsa -out $KEY 2048"
+    echo "-- $CMD"
+    $CMD || die "Failed genrsa"
 
     local SUBJECT="/CN=${USER_NAME}"
     [ ! -z "$GROUP" ] && SUBJECT="/CN=${USER_NAME}/O=${GROUP}"
 
-    openssl req -new -key ${USER_NAME}.key -out ${USER_NAME}.csr -subj $SUBJECT ||
-        die "Failed req -new -key"
+    CMD="openssl req -new -key $KEY -out $CSR -subj $SUBJECT"
+    echo "-- $CMD"
+    $CMD || die "Failed req -new -key"
 
     CA_OPTS="-CAcreateserial -CA /etc/kubernetes/pki/ca.crt -CAkey /etc/kubernetes/pki/ca.key"
 
     # Need sudo to read ca.key file:
     VALIDITY="-days 30"
     VALIDITY=""
-    sudo openssl x509 $CA_OPTS -req -in ${USER_NAME}.csr -out ${USER_NAME}.crt $VALIDITY
+    CMD="sudo openssl x509 $CA_OPTS -req -in $CSR -out $CRT $VALIDITY"
+    echo "-- $CMD"
+    $CMD || die "Failed 'openssl c509'"
 
     WRITE_KUBECONFIG $USER_NAME
 }
@@ -66,17 +77,24 @@ CREATE_KUBECONFIG_USING_CSR() {
     USER_NAME=$1; shift
     GROUP=$1;     shift
 
-    openssl genrsa -out ${USER_NAME}.key 2048 || die "Failed genrsa"
+    KEY=$TMP_DIR/${USER_NAME}.key
+    CRT=$TMP_DIR/${USER_NAME}.crt
+    CSR_F=$TMP_DIR/${USER_NAME}.csr
+
+    CMD="openssl genrsa -out $KEY 2048"
+    echo "-- $CMD"
+    $CMD || die "Failed genrsa"
 
     local SUBJECT="/CN=${USER_NAME}"
     [ ! -z "$GROUP" ] && SUBJECT="/CN=${USER_NAME}/O=${GROUP}"
 
-    openssl req -new -key ${USER_NAME}.key -out ${USER_NAME}.csr -subj $SUBJECT ||
-        die "Failed req -new -key"
-    #openssl req -in ${USER_NAME}.csr -noout -text ||
+    CMD="openssl req -new -key $KEY -out $CSR_F -subj $SUBJECT"
+    echo "-- $CMD"
+    $CMD || die "Failed req -new -key"
+    #openssl req -in $CSR_F -noout -text ||
     #    die "Failed req in"
 
-    CSR=$( cat ${USER_NAME}.csr | base64 | tr -d '\n' )
+    CSR=$( cat $CSR_F | base64 | tr -d '\n' )
 
     cat << EOF > signing-request.yaml 
 apiVersion: certificates.k8s.io/v1
@@ -99,7 +117,7 @@ EOF
         die "Failed certificate approve"
     kubectl get csr
 
-    USER_CERT=${USER_NAME}.crt
+    USER_CERT=$CRT
     kubectl get csr ${USER_NAME}-csr -o jsonpath='{.status.certificate}' | base64 -d > $USER_CERT
     [ ! -s "${USER_CERT}" ] &&
         die "Failed to get user certificate to $USER_CERT"
@@ -109,12 +127,12 @@ EOF
 
 
 WRITE_KUBECONFIG() {
-    kubectl get cm  kube-root-ca.crt -o json | jq -r '.data."ca.crt"' > ca.crt ||
+    kubectl get cm  kube-root-ca.crt -o json | jq -r '.data."ca.crt"' > $TMP_DIR/ca.crt ||
         die "Failed to get ca.crt"
 
-    CA_CERT=$(        cat           ca.crt | base64 -w0)
-    CLIENT_CA_CERT=$( cat ${USER_NAME}.crt | base64 -w0)
-    CLIENT_KEY_DATA=$(cat ${USER_NAME}.key | base64 -w0)
+    CA_CERT=$( cat $TMP_DIR/ca.crt | base64 -w0)
+    CLIENT_CA_CERT=$( cat $CRT     | base64 -w0)
+    CLIENT_KEY_DATA=$(cat $KEY     | base64 -w0)
 
     cat <<EOF > kubeconfig.${USER_NAME}
 apiVersion: v1
@@ -149,6 +167,13 @@ EOF
     else
         cp -a $PWD/kubeconfig.${USER_NAME} $OP_FILE
         ls -al $OP_FILE
+
+        OP_FILE=/home/$NEW_USER/.kube/config
+        sudo ls -d /home/$NEW_USER/.kube && {
+            sudo cp -a $PWD/kubeconfig.${USER_NAME} $OP_FILE
+            sudo chown -R ${NEW_USER}:${NEW_USER} /home/$NEW_USER/.kube
+            sudo ls -al $OP_FILE
+        }
     fi
 }
 
@@ -200,6 +225,6 @@ DESTROY $NEW_USER
 GET_CONTEXT_INFO
 [ -z "$CLUSTER_ADDR" ] && die "Failed to set CLUSTER_ADDR"
 
-# CREATE_KUBECONFIG_USING_CSR $NEW_USER $GROUP
-CREATE_KUBECONFIG $NEW_USER $GROUP
+CREATE_KUBECONFIG_USING_CSR $NEW_USER $GROUP
+# CREATE_KUBECONFIG_BUGGY $NEW_USER $GROUP
 
