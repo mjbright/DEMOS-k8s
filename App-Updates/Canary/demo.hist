@@ -1,0 +1,9 @@
+
+Run k1s.py to see Pods
+
+  kubectl apply -f .
+
+  517  2026-02-24 15:33:02 kubectl scale deploy web-blue --replicas 9; kubectl scale deploy web-green --replicas 1
+
+  518  2026-02-24 15:33:39 kubectl scale deploy web-blue --replicas 7; kubectl scale deploy web-green --replicas 3
+ 
