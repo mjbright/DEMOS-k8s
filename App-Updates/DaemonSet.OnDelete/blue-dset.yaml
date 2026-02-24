@@ -3,22 +3,19 @@ kind: DaemonSet
 
 metadata:
   labels:
-    app: web
-    version: blue-v1
-  name: web-blue
+    app: mydaemon
+  name: mydaemon-blue
 
 spec:
   updateStrategy:
     type: OnDelete
   selector:
     matchLabels:
-      app: web
-      version: blue-v1
+      app: mydaemon
   template:
     metadata:
       labels:
-        app: web
-        version: blue-v1
+        app: mydaemon
     spec:
       containers:
       - image: mjbright/k8s-demo:1
