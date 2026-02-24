@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: web
+    version: green-v2
+  name: web-green
+
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: web
+      version: green-v2
+  template:
+    metadata:
+      labels:
+        app: web
+        version: green-v2
+    spec:
+      containers:
+      - image: mjbright/k8s-demo:2
+        name: k8s-demo

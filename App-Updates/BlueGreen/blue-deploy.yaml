@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: web
+    version: blue-v1
+  name: web-blue
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: web
+      version: blue-v1
+  template:
+    metadata:
+      labels:
+        app: web
+        version: blue-v1
+    spec:
+      containers:
+      - image: mjbright/k8s-demo:1
+        name: k8s-demo
