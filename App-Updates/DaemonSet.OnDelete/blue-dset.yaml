@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: DaemonSet
+
+metadata:
+  labels:
+    app: web
+    version: blue-v1
+  name: web-blue
+
+spec:
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: web
+      version: blue-v1
+  template:
+    metadata:
+      labels:
+        app: web
+        version: blue-v1
+    spec:
+      containers:
+      - image: mjbright/k8s-demo:1
+        name: k8s-demo

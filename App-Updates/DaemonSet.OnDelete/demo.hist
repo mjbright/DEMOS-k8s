@@ -1,0 +1,16 @@
+
+Watch Pods using k1s.py
+
+  544  2026-02-24 15:38:11 kubectl apply -f blue-dset.yaml 
+
+  547  2026-02-24 15:40:21 kubectl get ds web-blue -o yaml | grep -i -A5 strategy
+
+  554  2026-02-24 15:43:20 kubectl get ds
+
+  555  2026-02-24 15:43:33 diff *yaml
+  556  2026-02-24 15:43:58 kubectl apply -f green-dset.yaml 
+Note: No change in DaemonSetPods
+
+  557  2026-02-24 15:44:32 kubectl delete pod  web-blue-pd7m8 
+Note: Deleted Pod is replaced, replacement uses new image
+
