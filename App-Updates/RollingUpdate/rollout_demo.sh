@@ -1,6 +1,6 @@
 #!/bin/bash
 
-. ../demos.rc
+. ../../demos.rc
 
 REPLICAS=10
 REPLICAS=8
