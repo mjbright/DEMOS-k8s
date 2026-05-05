@@ -1,0 +1,219 @@
+# Container Isolation [Docker]
+
+In these steps we will run some commands on the ```host``` (the Linux Virtual machine hosting a Container Engine)
+and other commands within Containers.
+
+This will demonstrate that the Containers have isolated:
+- Root filesystem
+- Processes
+- Networking
+
+A process running on the ```host``` system normally operates in the ```global``` Filesystem, Process and Networking ```Namespaces(kernel)```.
+
+A process running inside a Container operates in it's own ```private``` Filesystem, Process and Networking ```Namespaces(kernel)```.
+
+## 1. Creating a Container
+
+We can create a Container using the ```docker run``` command, or from a YAML (or JSON) manifest.
+
+<details>
+  <summary>Creating a new Pod (no shell)</summary>
+     docker run --name c1 mjbright/k8s-demo:1
+</details>
+
+**Note**: To check that the Container is running, we can use the ```docker ps``` command producing output such as
+```
+CONTAINER ID   IMAGE                 COMMAND                  CREATED         STATUS         PORTS     NAMES
+7682e69ebb34   mjbright/k8s-demo:1   "/app/demo-binary -l…"   3 minutes ago   Up 3 minutes   80/tcp    c1
+```
+
+## 2. Obtaining a shell in the Container
+
+### 2.1 No shell
+
+We can obtain a shell in the Pod using the ```docker exec``` command, specifying the path to the shell.
+
+But in this example this is not possible because the chosen image for the Pod Container does not include basic Linux commands:
+
+**Note:** the following produces an error:
+
+<details>
+  <summary>docker exec to c1</summary>
+      docker exec -it c1 /bin/sh
+</details>
+
+The error message will be similar to:
+```
+OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory
+```
+
+**Note:** This demonstrates already that the Container in the Pod has it's own **isolated filesystem**, as the usual shell /bin/sh is not present.
+
+```On the host```: You can check on your host system that the shell /bin/sh does exist there - but not in the Container.
+
+#### Delete the Container c1
+
+```docker rm -f c1```
+
+#### Check that no Containers are running
+
+```docker ps```
+
+#### Check that no Containers are present ('-a' option shows running and stopped Containers)
+
+```docker ps -a```
+
+### 2.2 Container2 - with a shell
+
+The files in a Container are provided by the Container Image used.
+
+Let's create a second Container, using a more complete Container Image:
+- the image includes the same application, but based on a very small ```Alpine Linux``` base:
+
+<details>
+  <summary>Creating a new Container (with a shell)</summary>
+      docker run --name c2 mjbright/k8s-demo:alpine1
+</details>
+
+**TODO:**
+```
+  91  2026-05-05 11:23:58 #docker run -it c1 -- /bin/sh
+   92  2026-05-05 11:24:39 #docker run
+   93  2026-05-05 11:24:54 sudo kill -9 3353888
+   94  2026-05-05 11:24:58 ps aux | grep demo-binary
+   95  2026-05-05 11:25:04 docker ps
+   96  2026-05-05 11:25:08 docker ps -a
+   97  2026-05-05 11:25:31 docker restart c2
+   98  2026-05-05 11:25:35 docker ps
+   99  2026-05-05 11:25:40 curl 172.17.0.2
+  100  2026-05-05 11:25:47 ps aux | grep demo-binary
+  101  2026-05-05 11:26:44 docker run mjbright/k8s-demo:2
+  102  2026-05-05 11:27:09 docker rm -f peaceful_greider
+  103  2026-05-05 11:27:15 docker ps -a
+  104  2026-05-05 11:27:36 docker run -d mjbright/k8s-demo:2
+  105  2026-05-05 11:27:41 docker ps
+  106  2026-05-05 11:28:27 docker inspect b | grep -i addre
+  107  2026-05-05 11:28:38 docker inspect bf | grep -i addre
+  108  2026-05-05 11:28:52 curl 172.17.0.3
+  109  2026-05-05 11:29:11 ps aux | grep demo-binary
+  110  2026-05-05 11:29:25 docker exec -it c2 /bin/sh
+  111  2026-05-05 11:29:39 docker exec -it bf /bin/sh
+  112  2026-05-05 11:30:27 ll /bin/sh
+  113  2026-05-05 11:30:38 docker inspect bf | grep -i addre
+  114  2026-05-05 11:30:47 docker inspect c2 | grep -i addre
+  115  2026-05-05 11:31:03 docker exec -it bf /bin/sh
+  116  2026-05-05 11:31:09 docker exec -it c2 /bin/sh
+  117  2026-05-05 11:31:36 ip a
+  118  2026-05-05 11:31:41 ip a  | less
+  ```
+  
+**Note**: Check that the Container ```c2``` is running, as well as the previous Container ```c1``` using the ```docker ps``` command producing output such as
+```
+NAME                       READY   STATUS    RESTARTS          AGE
+pod1                       1/1     Running   0               2m18s
+pod2                       1/1     Running   0                 7s
+```
+
+#### Exec into pod2:
+
+<details>
+  <summary>kubectl exec to pod2</summary>
+  ```kubectl exec -it pod2 -- sh```
+</details>
+
+This time we have a shell.
+
+Running the command ```ps aux``` in the shell will show all processes, you should see output similar to
+```
+/app # ps aux
+PID   USER     TIME  COMMAND
+    1 root      0:00 /app/demo-binary -l 80 -L 0 -R 0
+    9 root      0:00 /bin/sh
+   16 root      0:00 ps aux
+/app #
+```
+
+```On the host```: Compare this with running ```ps aux``` on the host
+
+#### Network namespace:
+
+Perform the command ```ip a``` within the Pod Container, you should see output of the form:
+**Note:** Actual values seen depend upon the hosting environment
+```
+/app # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+795: eth0@if796: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP
+    link/ether 3a:59:f4:de:80:09 brd ff:ff:ff:ff:ff:ff
+    inet 10.0.4.38/32 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::3859:f4ff:fede:8009/64 scope link
+       valid_lft forever preferred_lft forever
+/app #
+```
+
+We see the ```localhost``` interface and a ```eth0``` interface - in this case with address ```10.0.4.38```.
+
+```On the host```: Run the same ```ip a``` command - note that you will see a lot of output !
+
+That output may look like the following:
+**Note:** Actual values seen depend upon the hosting environment
+```
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether bc:24:11:8e:60:fd brd ff:ff:ff:ff:ff:ff
+    inet 172.16.16.24/24 brd 172.16.16.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::be24:11ff:fe8e:60fd/64 scope link
+       valid_lft forever preferred_lft forever
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default
+    link/ether ba:38:19:f9:1d:11 brd ff:ff:ff:ff:ff:ff
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+       valid_lft forever preferred_lft forever
+
+... FOLLOWING LINES OMITTED ...
+
+5: cilium_host@cilium_net: <BROADCAST,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether 6e:f1:d6:48:2a:04 brd ff:ff:ff:ff:ff:ff
+    inet 10.0.0.206/32 scope global cilium_host
+       valid_lft forever preferred_lft forever
+
+... FOLLOWING LINES OMITTED ...
+```
+
+<!--
+Note also that the Container has an ip address on the same subnet as the Container Engine
+- in this case the subnet ```10.0.0.206/32``` corresponds to the ```cilium``` interface
+- in this case the ip address ```10.0.4.38/32``` falls within
+-->
+
+# Summary
+
+We have demonstrated that a shell within a Container has a completely different view of
+- Files
+- Processes
+- Networking
+
+This demonstrates the utility of Containers.
+
+This **isolation** allows to run ```many instances``` of ```many applications``` on the same machine without conflicts
+- between files, e.g. conflicting libraries
+- between processes
+- between ip addresses
+
+
+<!--
+<details>
+  <summary>Details</summary>
+  Something small enough to escape casual notice.
+</details>
+-->
