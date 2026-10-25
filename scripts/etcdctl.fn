@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# Source this file in Bash 4+: source ./etcdctl.txt
+# The .txt download extension does not affect sourcing; rename to .sh if desired.
+#
+# Assumptions: kubeadm-style stacked etcd, TLS on client port 2379, an
+# "etcd" container with etcdctl installed, and kubectl access to pods/exec.
+# No certificate or private key is copied out of a Pod.
+#
+# Examples (all commands below are diagnostic):
+#   etcdctl                                  # One Pod: local endpoint status
+#   etcdctl member list -w table
+#   etcdctl endpoint status -w table
+#   etcdctl endpoint health -w table
+#   etcdctl -x endpoint health -w table      # See actual kubectl command
+#
+#   etcdctl snapshot save /var/lib/etcd/snapshot1.db
+#   sudo ls -al /var/lib/etcd/snapshot1.db
+#
+#   etcdctl_all                              # Status of discovered endpoints
+#   etcdctl_all endpoint status -w table
+#   etcdctl_all endpoint health -w table
+#   etcdctl_all --leader                     # One JSON leader observation
+#   etcdctl_all -L                           # Repeat leader observation
+#   etcdctl_all --watch --interval 5 endpoint status -w table
+#   ETCDCTL_NODE=cp2 etcdctl endpoint status -w json
+#   ETCDCTL_CONTEXT=production etcdctl_all member list -w table
+#   etcdctl -- get '/example/key with spaces' # Exact argv is preserved
+
+etcdctl() {
+    _etcdctl_run single "$@"
+}
+
+etcdctl_all() {
+    _etcdctl_run all "$@"
+}
+
+_etcdctl_run() (
+    # Isolate shell options, variables, and the internal helpers from callers.
+    # Use explicit status handling even if the calling shell enabled errexit.
+    set +e
+    # Bash 4.0-4.3 can treat empty arrays as unset under nounset.
+    # All optional inputs below are explicitly defaulted or validated.
+    set +u
+    set -o pipefail
+    if (( BASH_VERSINFO[0] < 4 )); then
+        printf 'etcdctl wrapper: Bash 4+ is required\n' >&2
+        return 2
+    fi
+
+    local mode=$1
+    shift
+    local poll=0 leader_only=0 debug=0 interval=2
+    while (( $# )); do
+        case $1 in
+            --watch|-l) poll=1; shift ;;
+            --leader) leader_only=1; shift ;;
+            -L) leader_only=1; poll=1; shift ;;
+            --debug|-x) debug=1; shift ;;
+            --interval)
+                if (( $# < 2 )); then
+                    printf 'etcdctl wrapper: --interval needs seconds\n' >&2
+                    return 2
+                fi
+                interval=$2
+                shift 2
+                ;;
+            --help)
+                printf '%s\n' \
+                    'Usage: etcdctl[_all] [wrapper options] [--] [etcdctl arguments]' \
+                    '  --watch, -l       Repeat until interrupted or a command fails' \
+                    '  --interval SEC   Positive polling delay; default: 2 seconds' \
+                    '  --leader         One-shot leader JSON; requires local Python 3' \
+                    '  -L               --leader plus --watch (legacy spelling)' \
+                    '  --debug, -x      Print quoted exec argv to stderr; no set -x' \
+                    '  --help           Wrapper help; use -- --help for etcdctl help' \
+                    'Default command: endpoint status -w table' \
+                    'See the source header for configuration, examples, and cautions.'
+                return 0
+                ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    if [[ ! $interval =~ ^[0-9]+([.][0-9]+)?$ ||
+          -z ${interval//[0.]/} ]]; then
+        printf 'etcdctl wrapper: polling interval must be positive seconds\n' >&2
+        return 2
+    fi
+    if (( leader_only && $# )); then
+        printf 'etcdctl wrapper: --leader/-L cannot take an etcdctl command\n' >&2
+        return 2
+    fi
+
+    local kubectl_bin=${KUBECTL_BIN:-kubectl}
+    if ! command -v "$kubectl_bin" >/dev/null 2>&1; then
+        printf 'etcdctl wrapper: command not found: %s\n' "$kubectl_bin" >&2
+        return 127
+    fi
+    if (( leader_only )) && ! command -v python3 >/dev/null 2>&1; then
+        printf 'etcdctl wrapper: leader mode requires local Python 3\n' >&2
+        return 127
+    fi
+
+    local namespace=${ETCDCTL_NAMESPACE:-kube-system}
+    local selector=${ETCDCTL_SELECTOR:-component=etcd}
+    local container=${ETCDCTL_CONTAINER:-etcd}
+    local requested_pod=${ETCDCTL_POD:-} requested_node=${ETCDCTL_NODE:-}
+    local port=${ETCDCTL_CLIENT_PORT:-2379}
+    if [[ ! $port =~ ^[0-9]{1,5}$ ]]; then
+        printf 'etcdctl wrapper: invalid ETCDCTL_CLIENT_PORT: %s\n' "$port" >&2
+        return 2
+    fi
+    port=$((10#$port))
+    if (( port < 1 || port > 65535 )); then
+        printf 'etcdctl wrapper: client port must be in 1..65535\n' >&2
+        return 2
+    fi
+
+    local -a kubectl_args=(
+        "--namespace=$namespace"
+        "--request-timeout=${ETCDCTL_REQUEST_TIMEOUT:-15s}"
+    )
+    if [[ -n ${ETCDCTL_CONTEXT:-} ]]; then
+        kubectl_args+=("--context=$ETCDCTL_CONTEXT")
+    fi
+    local -a tls_args=(
+        "--cacert=${ETCDCTL_CACERT:-/etc/kubernetes/pki/etcd/ca.crt}"
+        "--cert=${ETCDCTL_CERT:-/etc/kubernetes/pki/etcd/healthcheck-client.crt}"
+        "--key=${ETCDCTL_KEY:-/etc/kubernetes/pki/etcd/healthcheck-client.key}"
+        "--dial-timeout=${ETCDCTL_DIAL_TIMEOUT:-3s}"
+        "--command-timeout=${ETCDCTL_COMMAND_TIMEOUT:-10s}"
+    )
+    local -a command_args=("$@")
+    if (( leader_only )); then
+        command_args=(endpoint status --write-out=json)
+    elif (( ${#command_args[@]} == 0 )); then
+        command_args=(endpoint status --write-out=table)
+    fi
+
+    local exec_pod endpoints
+    _etcdctl_discover() {
+        local listing status pod node phase ip deleting address
+        local -a candidates=() discovered_endpoints=()
+        # A non-whitespace delimiter preserves empty fields in Bash read.
+        local jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.nodeName}{"|"}{.status.phase}{"|"}{.status.podIP}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}'
+        if listing=$("$kubectl_bin" "${kubectl_args[@]}" get pods \
+            "--selector=$selector" --sort-by=.metadata.name "-o=jsonpath=$jsonpath"); then
+            :
+        else
+            status=$?
+            printf 'etcdctl wrapper: Pod discovery failed\n' >&2
+            return "$status"
+        fi
+        while IFS='|' read -r pod node phase ip deleting; do
+            [[ -n $pod ]] || continue
+            if [[ $phase != Running || -n $deleting || -z $ip ]]; then
+                printf 'etcdctl wrapper: skipping Pod %s (phase=%s, IP=%s, deleting=%s)\n' \
+                    "$pod" "$phase" "${ip:-none}" "${deleting:-no}" >&2
+                continue
+            fi
+            address=$ip
+            [[ $ip != *:* ]] || address="[$ip]"
+            discovered_endpoints+=("https://$address:$port")
+            [[ -z $requested_pod || $pod == "$requested_pod" ]] || continue
+            [[ -z $requested_node || $node == "$requested_node" ]] || continue
+            candidates+=("$pod")
+        done <<< "$listing"
+        if (( ${#candidates[@]} == 0 )); then
+            printf 'etcdctl wrapper: no eligible exec Pod; check namespace, selector, POD, NODE, and Pod state\n' >&2
+            return 1
+        fi
+        if [[ $mode == single ]] && (( ${#candidates[@]} != 1 )); then
+            ETCDCTL_POD=$( kubectl get -n kube-system pods -l component=etcd -o name | head -1 | sed -e 's?pod/??' )
+            #echo "ETCDCTL_POD='$ETCDCTL_POD'"
+            [ -z "$ETCDCTL_POD" ] && {
+                printf 'etcdctl wrapper: multiple Pods; set ETCDCTL_POD or ETCDCTL_NODE, or use etcdctl_all\n' >&2
+                return 2
+            }
+        fi
+        exec_pod=${candidates[0]}
+        if [[ -n ${ETCDCTL_ENDPOINTS:-} ]]; then
+            endpoints=$ETCDCTL_ENDPOINTS
+        elif [[ $mode == single ]]; then
+            endpoints="https://127.0.0.1:$port"
+        else
+            # Join in a subshell so IFS in the discovery function is unchanged.
+            endpoints=$(IFS=,; printf '%s' "${discovered_endpoints[*]}")
+        fi
+    }
+
+    _etcdctl_leader() {
+        # Python integers preserve uint64 member IDs exactly; some JSON tools
+        # convert them to floating point and can compare nearby IDs incorrectly.
+        python3 -c '
+import json
+import sys
+
+try:
+    rows = json.load(sys.stdin)
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("expected a nonempty endpoint-status array")
+    leaders = []
+    for row in rows:
+        status = row["Status"]
+        member = status["header"]["member_id"]
+        leader = status["leader"]
+        if type(member) is not int or type(leader) is not int:
+            raise ValueError("expected integer member and leader IDs")
+        if leader != 0 and member == leader:
+            leaders.append({"leader": row["Endpoint"], "member_id": hex(member)})
+    if len(leaders) != 1:
+        raise ValueError("expected exactly one responding leader; found %d" % len(leaders))
+    print(json.dumps(leaders[0], separators=(",", ":")))
+except (ValueError, KeyError, TypeError) as error:
+    print("etcdctl wrapper: cannot determine leader: %s" % error, file=sys.stderr)
+    sys.exit(1)
+'
+    }
+
+    local iteration=0 status output
+    local -a invocation=()
+    while :; do
+        if _etcdctl_discover; then :; else return $?; fi
+        invocation=("$kubectl_bin" "${kubectl_args[@]}" exec "$exec_pod"
+            "--container=$container" -- etcdctl "${tls_args[@]}"
+            "--endpoints=$endpoints" "${command_args[@]}")
+        if (( poll )); then
+            printf '[%s] sample=%s exec-pod=%s\n' \
+                "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$iteration" "$exec_pod" >&2
+        fi
+        if (( debug )); then
+            printf 'exec:\n ' >&2
+            printf ' %q' "${invocation[@]}" >&2
+            printf '\n\n' >&2
+        fi
+        if (( leader_only )); then
+            # Do not publish a leader from partial output after a failed RPC.
+            if output=$("${invocation[@]}"); then :; else return $?; fi
+            if printf '%s\n' "$output" | _etcdctl_leader; then :; else return $?; fi
+        else
+            # Stream normal/binary output without command substitution.
+            if "${invocation[@]}"; then :; else return $?; fi
+        fi
+        (( poll )) || return 0
+        iteration=$((iteration + 1))
+        if sleep "$interval"; then :; else status=$?; return "$status"; fi
+    done
+)
