@@ -18,7 +18,7 @@ SVC=svc/$APP_NAME
 
 KUBECTL="kubectl -n demo"
 kubectl get ns demo || RUN kubectl create ns demo
-RUN kubectl rollout restart -n kube-system deployment coredns
+# RUN kubectl rollout restart -n kube-system deployment coredns
 
 TMP=~/tmp/demos
 mkdir -p $TMP
